@@ -1,140 +1,80 @@
 #import <UIKit/UIKit.h>
-#import <PhotosUI/PhotosUI.h>
 #import <objc/runtime.h>
 
-#pragma mark - Utilities
+#pragma mark - Utility: Top View Controller
 
-static UIViewController *topMostViewController(void) {
-    UIWindow *keyWindow = nil;
+static UIViewController *VC_TopMostViewController(void) {
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        UIWindowScene *windowScene = (UIWindowScene *)scene;
+        if (windowScene.activationState != UISceneActivationStateForegroundActive) continue;
 
-    for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if (scene.activationState == UISceneActivationStateForegroundActive) {
-            keyWindow = scene.windows.firstObject;
-            break;
-        }
-    }
-
-    UIViewController *root = keyWindow.rootViewController;
-    while (root.presentedViewController) {
-        root = root.presentedViewController;
-    }
-    return root;
-}
-
-#pragma mark - Delegate
-
-@interface VCPhotoDelegate : NSObject <PHPickerViewControllerDelegate>
-@property (nonatomic, copy) void (^resolveBlock)(id result);
-@end
-
-@implementation VCPhotoDelegate
-
-- (void)picker:(PHPickerViewController *)picker
-didFinishPicking:(NSArray<PHPickerResult *> *)results {
-
-    UIViewController *presentingVC = picker.presentingViewController;
-    [picker dismissViewControllerAnimated:YES completion:nil];
-
-    // ✅ CASE C: Cancel → đóng luôn camera
-    if (results.count == 0) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [presentingVC dismissViewControllerAnimated:YES completion:nil];
-        });
-        return;
-    }
-
-    PHPickerResult *result = results.firstObject;
-
-    if (![result.itemProvider canLoadObjectOfClass:[UIImage class]]) {
-        return;
-    }
-
-    [result.itemProvider loadObjectOfClass:[UIImage class]
-                         completionHandler:^(UIImage *image, NSError *error) {
-
-        if (!image || error) {
-            return;
-        }
-
-        NSData *data = UIImageJPEGRepresentation(image, 0.9);
-        if (!data) return;
-
-        NSString *filePath =
-        [NSTemporaryDirectory()
-         stringByAppendingPathComponent:
-         [NSString stringWithFormat:@"picked_%@.jpg",
-          [[NSUUID UUID] UUIDString]]];
-
-        if (![data writeToFile:filePath atomically:YES]) {
-            return;
-        }
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (self.resolveBlock) {
-                self.resolveBlock(@{
-                    @"path": filePath,
-                    @"width": @(image.size.width),
-                    @"height": @(image.size.height)
-                });
+        for (UIWindow *window in windowScene.windows) {
+            if (window.isKeyWindow) {
+                UIViewController *root = window.rootViewController;
+                while (root.presentedViewController) {
+                    root = root.presentedViewController;
+                }
+                return root;
             }
-        });
-    }];
+        }
+    }
+    return nil;
 }
 
-@end
+#pragma mark - Verification
 
-#pragma mark - Hook
-
-static void (*orig_takePhoto)(id, SEL, id, id, id);
-
-static void replaced_takePhoto(id self,
-                               SEL _cmd,
-                               id options,
-                               id resolve,
-                               id reject) {
+__attribute__((constructor))
+static void init_verify() {
 
     dispatch_async(dispatch_get_main_queue(), ^{
 
-        if (@available(iOS 14.0, *)) {
+        NSMutableString *status = [NSMutableString stringWithString:@"VisionCameraHook VERIFY\n\n"];
 
-            PHPickerConfiguration *config =
-            [[PHPickerConfiguration alloc] init];
-            config.filter = [PHPickerFilter imagesFilter];
-            config.selectionLimit = 1;
+        // ✅ 1. Dylib loaded
+        [status appendString:@"✅ Dylib Loaded\n"];
 
-            PHPickerViewController *picker =
-            [[PHPickerViewController alloc] initWithConfiguration:config];
-
-            VCPhotoDelegate *delegate = [VCPhotoDelegate new];
-            delegate.resolveBlock = resolve;
-            picker.delegate = delegate;
-
-            // giữ delegate sống
-            objc_setAssociatedObject(picker,
-                                     @"vc_delegate",
-                                     delegate,
-                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-            UIViewController *topVC = topMostViewController();
-            [topVC presentViewController:picker
-                                animated:YES
-                              completion:nil];
+        // ✅ 2. Check class existence
+        Class cls = objc_getClass("CameraViewManager");
+        if (cls) {
+            [status appendString:@"✅ CameraViewManager found\n"];
+        } else {
+            [status appendString:@"❌ CameraViewManager NOT found\n"];
         }
+
+        // ✅ 3. Check selector existence
+        SEL sel = sel_registerName("takePhoto:options:resolve:reject:");
+        if (cls && class_getInstanceMethod(cls, sel)) {
+            [status appendString:@"✅ takePhoto method found\n"];
+        } else {
+            [status appendString:@"❌ takePhoto method NOT found\n"];
+        }
+
+        // ✅ 4. Show IMP address (optional debug)
+        if (cls) {
+            Method m = class_getInstanceMethod(cls, sel);
+            if (m) {
+                IMP imp = method_getImplementation(m);
+                [status appendFormat:@"\nIMP: %p\n", imp];
+            }
+        }
+
+        // ✅ Show Alert
+        UIViewController *topVC = VC_TopMostViewController();
+        if (!topVC) return;
+
+        UIAlertController *alert =
+        [UIAlertController alertControllerWithTitle:@"DYLIB STATUS"
+                                            message:status
+                                     preferredStyle:UIAlertControllerStyleAlert];
+
+        UIAlertAction *ok =
+        [UIAlertAction actionWithTitle:@"OK"
+                                 style:UIAlertActionStyleDefault
+                               handler:nil];
+
+        [alert addAction:ok];
+
+        [topVC presentViewController:alert animated:YES completion:nil];
     });
-}
-
-#pragma mark - Constructor
-
-__attribute__((constructor))
-static void init_hook() {
-
-    Class cls = objc_getClass("CameraViewManager");
-    if (!cls) return;
-
-    SEL sel = sel_registerName("takePhoto:options:resolve:reject:");
-    Method method = class_getInstanceMethod(cls, sel);
-    if (!method) return;
-
-    orig_takePhoto = (void *)method_getImplementation(method);
-    method_setImplementation(method, (IMP)replaced_takePhoto);
 }
