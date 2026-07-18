@@ -1,0 +1,26 @@
+name: Build iOS Dylib
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: ✅ Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🔧 Make build script executable
+        run: chmod +x build.sh
+
+      - name: 🛠 Build dylib
+        run: ./build.sh
+
+      - name: 📦 Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VisionCameraHook-dylib
+          path: VisionCameraHook.dylib
