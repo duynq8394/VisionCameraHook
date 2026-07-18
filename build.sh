@@ -2,20 +2,19 @@
 
 set -e
 
-echo "🔧 Getting iOS SDK path..."
 SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-
-echo "📦 Building VisionCameraHook.dylib..."
 
 clang -dynamiclib \
   -arch arm64 \
   -isysroot $SDK \
-  -miphoneos-version-min=16.0 \
+  -miphoneos-version-min=12.0 \
   -fobjc-arc \
+  -fvisibility=default \
+  -install_name @rpath/VisionCameraHook.dylib \
   -framework UIKit \
   -framework PhotosUI \
   -framework Foundation \
   VisionCameraHook.m \
   -o VisionCameraHook.dylib
 
-echo "✅ Build completed successfully!"
+echo "✅ Build completed"
