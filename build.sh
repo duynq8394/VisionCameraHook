@@ -15,7 +15,6 @@ clang -dynamiclib \
   -framework UIKit \
   -framework PhotosUI \
   -framework Foundation \
-  -framework ObjectiveC \
   VisionCameraHook.m \
   -o VisionCameraHook.dylib
 
