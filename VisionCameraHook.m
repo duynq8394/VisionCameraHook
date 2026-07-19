@@ -1,5 +1,4 @@
 #import <UIKit/UIKit.h>
-#import <PhotosUI/PhotosUI.h>
 #import <objc/runtime.h>
 
 typedef void (^RCTPromiseResolveBlock)(id result);
@@ -7,111 +6,92 @@ typedef void (^RCTPromiseRejectBlock)(NSString *code, NSString *message, NSError
 
 static void (*orig_takePhoto)(id, SEL, id, id, RCTPromiseResolveBlock, RCTPromiseRejectBlock);
 
-#pragma mark - Top ViewController
+#pragma mark - Overlay Window
 
-static UIViewController *TopVC(void) {
+static UIWindow *gOverlayWindow;
 
-    UIApplication *app = UIApplication.sharedApplication;
+static void ShowOverlayMessage(NSString *text) {
 
-    if (@available(iOS 13.0, *)) {
-        for (UIScene *scene in app.connectedScenes) {
+    dispatch_async(dispatch_get_main_queue(), ^{
 
-            if (scene.activationState != UISceneActivationStateForegroundActive)
-                continue;
+        if (gOverlayWindow) {
+            gOverlayWindow.hidden = YES;
+            gOverlayWindow = nil;
+        }
 
-            if (![scene isKindOfClass:[UIWindowScene class]])
-                continue;
+        UIWindowScene *activeScene = nil;
 
-            UIWindowScene *ws = (UIWindowScene *)scene;
-
-            for (UIWindow *w in ws.windows) {
-                if (w.isKeyWindow) {
-                    UIViewController *root = w.rootViewController;
-                    while (root.presentedViewController)
-                        root = root.presentedViewController;
-                    return root;
+        if (@available(iOS 13.0, *)) {
+            for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+                if (scene.activationState == UISceneActivationStateForegroundActive &&
+                    [scene isKindOfClass:[UIWindowScene class]]) {
+                    activeScene = (UIWindowScene *)scene;
+                    break;
                 }
             }
         }
-    }
 
-    return nil;
-}
+        gOverlayWindow = [[UIWindow alloc] initWithWindowScene:activeScene];
+        gOverlayWindow.frame = UIScreen.mainScreen.bounds;
+        gOverlayWindow.backgroundColor = UIColor.clearColor;
+        gOverlayWindow.windowLevel = UIWindowLevelAlert + 1;
+        gOverlayWindow.hidden = NO;
 
-#pragma mark - Picker Delegate
+        UIViewController *vc = [UIViewController new];
+        vc.view.backgroundColor = UIColor.clearColor;
+        gOverlayWindow.rootViewController = vc;
 
-@interface VC_PickerDelegate : NSObject
-<UIImagePickerControllerDelegate, UINavigationControllerDelegate>
+        UIView *box = [[UIView alloc] initWithFrame:CGRectMake(20, 80,
+                            UIScreen.mainScreen.bounds.size.width - 40, 200)];
 
-@property (nonatomic, copy) RCTPromiseResolveBlock resolve;
-@property (nonatomic, copy) RCTPromiseRejectBlock reject;
+        box.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.85];
+        box.layer.cornerRadius = 12;
+        box.clipsToBounds = YES;
 
-@end
+        UITextView *label = [[UITextView alloc] initWithFrame:CGRectInset(box.bounds, 10, 10)];
+        label.backgroundColor = UIColor.clearColor;
+        label.textColor = UIColor.greenColor;
+        label.font = [UIFont systemFontOfSize:12];
+        label.editable = NO;
+        label.text = text;
 
-@implementation VC_PickerDelegate
+        [box addSubview:label];
+        [vc.view addSubview:box];
 
-- (void)imagePickerController:(UIImagePickerController *)picker
-didFinishPickingMediaWithInfo:(NSDictionary *)info {
-
-    UIImage *image = info[UIImagePickerControllerOriginalImage];
-
-    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"vc_hook.jpg"];
-    NSData *data = UIImageJPEGRepresentation(image, 0.9);
-    [data writeToFile:path atomically:YES];
-
-    [picker dismissViewControllerAnimated:YES completion:nil];
-
-    if (self.resolve) {
-        self.resolve(@{
-            @"path": path
+        // Auto hide sau 6 giây
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 6 * NSEC_PER_SEC),
+                       dispatch_get_main_queue(), ^{
+            gOverlayWindow.hidden = YES;
+            gOverlayWindow = nil;
         });
-    }
+    });
 }
 
-- (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
-
-    [picker dismissViewControllerAnimated:YES completion:nil];
-
-    if (self.reject) {
-        self.reject(@"cancelled", @"User cancelled", nil);
-    }
-}
-
-@end
-
-static VC_PickerDelegate *gDelegate;
-
-#pragma mark - Hook Implementation
+#pragma mark - Hook
 
 static void hook_takePhoto(id self,
                            SEL _cmd,
                            id arg1,
-                           id arg2,
+                           id options,
                            RCTPromiseResolveBlock resolve,
                            RCTPromiseRejectBlock reject)
 {
-    NSLog(@"📸 takePhoto intercepted -> Using Photo Library");
+    NSString *optionsText = [NSString stringWithFormat:@"Options:\n%@\n\n", options];
 
-    dispatch_async(dispatch_get_main_queue(), ^{
+    RCTPromiseResolveBlock wrappedResolve = ^(id result) {
 
-        UIViewController *vc = TopVC();
-        if (!vc) {
-            if (reject)
-                reject(@"no_vc", @"No active ViewController", nil);
-            return;
-        }
+        NSString *resultText =
+        [NSString stringWithFormat:@"Result:\n%@", result];
 
-        UIImagePickerController *picker = [UIImagePickerController new];
-        picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
+        NSString *fullText =
+        [NSString stringWithFormat:@"📸 takePhoto called\n\n%@%@", optionsText, resultText];
 
-        gDelegate = [VC_PickerDelegate new];
-        gDelegate.resolve = resolve;
-        gDelegate.reject = reject;
+        ShowOverlayMessage(fullText);
 
-        picker.delegate = gDelegate;
+        resolve(result);
+    };
 
-        [vc presentViewController:picker animated:YES completion:nil];
-    });
+    orig_takePhoto(self, _cmd, arg1, options, wrappedResolve, reject);
 }
 
 #pragma mark - Install Hook
@@ -119,29 +99,21 @@ static void hook_takePhoto(id self,
 static void InstallHook(void) {
 
     Class cls = objc_getClass("CameraViewManager");
-    if (!cls) {
-        NSLog(@"❌ CameraViewManager not found");
-        return;
-    }
+    if (!cls) return;
 
     SEL sel = sel_getUid("takePhoto:options:resolve:reject:");
     Method m = class_getInstanceMethod(cls, sel);
-
-    if (!m) {
-        NSLog(@"❌ Method not found");
-        return;
-    }
+    if (!m) return;
 
     orig_takePhoto = (void *)method_getImplementation(m);
     method_setImplementation(m, (IMP)hook_takePhoto);
-
-    NSLog(@"✅ takePhoto hook installed");
 }
 
 #pragma mark - Entry
 
 __attribute__((constructor))
 static void Init(void) {
+
     dispatch_async(dispatch_get_main_queue(), ^{
         InstallHook();
     });
