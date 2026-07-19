@@ -1,65 +1,105 @@
 #import <UIKit/UIKit.h>
+#import <PhotosUI/PhotosUI.h>
 #import <objc/runtime.h>
 
-static BOOL gInspectorShown = NO;
+typedef void (^RCTPromiseResolveBlock)(id result);
+typedef void (^RCTPromiseRejectBlock)(NSString *code, NSString *message, NSError *error);
 
-#pragma mark - Utility: Top ViewController
+static void (*orig_takePhoto)(id, SEL, id, id, RCTPromiseResolveBlock, RCTPromiseRejectBlock);
 
-static UIViewController *VC_TopViewController(void) {
+#pragma mark - Top VC
 
-    UIApplication *app = UIApplication.sharedApplication;
+static UIViewController *TopVC(void) {
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        if (scene.activationState != UISceneActivationStateForegroundActive) continue;
 
-    if (@available(iOS 13.0, *)) {
-
-        for (UIScene *scene in app.connectedScenes) {
-
-            if (scene.activationState != UISceneActivationStateForegroundActive)
-                continue;
-
-            if (![scene isKindOfClass:[UIWindowScene class]])
-                continue;
-
-            UIWindowScene *windowScene = (UIWindowScene *)scene;
-
-            for (UIWindow *window in windowScene.windows) {
-
-                if (window.isKeyWindow) {
-
-                    UIViewController *root = window.rootViewController;
-
-                    while (root.presentedViewController) {
-                        root = root.presentedViewController;
-                    }
-
-                    return root;
-                }
+        UIWindowScene *ws = (UIWindowScene *)scene;
+        for (UIWindow *w in ws.windows) {
+            if (w.isKeyWindow) {
+                UIViewController *root = w.rootViewController;
+                while (root.presentedViewController)
+                    root = root.presentedViewController;
+                return root;
             }
         }
     }
-
     return nil;
 }
 
-#pragma mark - Generic Hook Trampoline
+#pragma mark - Image Picker Delegate Wrapper
 
-typedef void (*GenericFunc)(id, SEL, ...);
+@interface VC_PickerDelegate : NSObject <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
+@property (nonatomic, copy) RCTPromiseResolveBlock resolve;
+@property (nonatomic, copy) RCTPromiseRejectBlock reject;
+@end
 
-static void GenericHook(id self, SEL _cmd, ...) {
+@implementation VC_PickerDelegate
 
-    NSLog(@"🔥 Inspector: Method triggered -> %@", NSStringFromSelector(_cmd));
+- (void)imagePickerController:(UIImagePickerController *)picker
+didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey,id> *)info {
 
-    // Gọi lại original
-    Method m = class_getInstanceMethod([self class], _cmd);
-    IMP originalImp = method_getImplementation(m);
+    UIImage *image = info[UIImagePickerControllerOriginalImage];
 
-    if (originalImp) {
-        ((GenericFunc)originalImp)(self, _cmd);
+    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"vc_hook.jpg"];
+    NSData *data = UIImageJPEGRepresentation(image, 0.9);
+    [data writeToFile:path atomically:YES];
+
+    [picker dismissViewControllerAnimated:YES completion:nil];
+
+    if (self.resolve) {
+        self.resolve(@{ @"path": path });
     }
 }
 
-#pragma mark - Hook Methods Dynamically
+- (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
 
-static void VC_InstallInspectorHooks(void) {
+    [picker dismissViewControllerAnimated:YES completion:nil];
+
+    if (self.reject) {
+        self.reject(@"cancelled", @"User cancelled", nil);
+    }
+}
+
+@end
+
+static VC_PickerDelegate *gPickerDelegate;
+
+#pragma mark - Hook
+
+static void hook_takePhoto(id self,
+                           SEL _cmd,
+                           id arg1,
+                           id arg2,
+                           RCTPromiseResolveBlock resolve,
+                           RCTPromiseRejectBlock reject)
+{
+    NSLog(@"📸 takePhoto intercepted -> Opening Photo Library");
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+
+        UIViewController *vc = TopVC();
+        if (!vc) {
+            reject(@"no_vc", @"No ViewController", nil);
+            return;
+        }
+
+        UIImagePickerController *picker = [UIImagePickerController new];
+        picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
+
+        gPickerDelegate = [VC_PickerDelegate new];
+        gPickerDelegate.resolve = resolve;
+        gPickerDelegate.reject = reject;
+
+        picker.delegate = gPickerDelegate;
+
+        [vc presentViewController:picker animated:YES completion:nil];
+    });
+}
+
+#pragma mark - Install
+
+static void InstallHook(void) {
 
     Class cls = objc_getClass("CameraViewManager");
     if (!cls) {
@@ -67,76 +107,23 @@ static void VC_InstallInspectorHooks(void) {
         return;
     }
 
-    unsigned int count = 0;
-    Method *methods = class_copyMethodList(cls, &count);
+    SEL sel = sel_getUid("takePhoto:options:resolve:reject:");
+    Method m = class_getInstanceMethod(cls, sel);
 
-    NSLog(@"===== CameraViewManager Methods (%u) =====", count);
-
-    for (unsigned int i = 0; i < count; i++) {
-
-        SEL sel = method_getName(methods[i]);
-        NSString *name = NSStringFromSelector(sel);
-
-        NSLog(@"Method: %@", name);
-
-        if ([name containsString:@"takePhoto"]) {
-
-            NSLog(@"✅ Installing inspector hook for %@", name);
-
-            method_setImplementation(methods[i], (IMP)GenericHook);
-        }
+    if (!m) {
+        NSLog(@"❌ takePhoto method not found");
+        return;
     }
 
-    free(methods);
+    orig_takePhoto = (void *)method_getImplementation(m);
+    method_setImplementation(m, (IMP)hook_takePhoto);
+
+    NSLog(@"✅ Hook installed successfully");
 }
-
-#pragma mark - UI Verify
-
-static void VC_ShowInspectorAlert(void) {
-
-    if (gInspectorShown) return;
-    gInspectorShown = YES;
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-
-        NSMutableString *msg =
-        [NSMutableString stringWithString:@"✅ Inspector Loaded\n\n"];
-
-        Class cls = objc_getClass("CameraViewManager");
-
-        if (cls)
-            [msg appendString:@"✅ CameraViewManager found\n"];
-        else
-            [msg appendString:@"❌ CameraViewManager NOT found\n"];
-
-        UIViewController *top = VC_TopViewController();
-        if (!top) return;
-
-        UIAlertController *alert =
-        [UIAlertController alertControllerWithTitle:@"VisionCamera Inspector"
-                                            message:msg
-                                     preferredStyle:UIAlertControllerStyleAlert];
-
-        UIAlertAction *ok =
-        [UIAlertAction actionWithTitle:@"OK"
-                                 style:UIAlertActionStyleDefault
-                               handler:nil];
-
-        [alert addAction:ok];
-        [top presentViewController:alert animated:YES completion:nil];
-    });
-}
-
-#pragma mark - Entry
 
 __attribute__((constructor))
-static void VisionCameraHook_Init(void) {
-
-    NSLog(@"✅ Inspector dylib injected");
-
+static void Init(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
-
-        VC_ShowInspectorAlert();
-        VC_InstallInspectorHooks();
+        InstallHook();
     });
 }
