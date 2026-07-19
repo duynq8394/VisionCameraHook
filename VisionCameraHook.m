@@ -1,105 +1,45 @@
 #import <UIKit/UIKit.h>
-#import <PhotosUI/PhotosUI.h>
 #import <objc/runtime.h>
 
-typedef void (^RCTPromiseResolveBlock)(id result);
-typedef void (^RCTPromiseRejectBlock)(NSString *code, NSString *message, NSError *error);
+static BOOL gShown = NO;
 
-static void (*orig_takePhoto)(id, SEL, id, id, RCTPromiseResolveBlock, RCTPromiseRejectBlock);
-
-#pragma mark - Top VC
+#pragma mark - Top View Controller
 
 static UIViewController *TopVC(void) {
-    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-        if (scene.activationState != UISceneActivationStateForegroundActive) continue;
 
-        UIWindowScene *ws = (UIWindowScene *)scene;
-        for (UIWindow *w in ws.windows) {
-            if (w.isKeyWindow) {
-                UIViewController *root = w.rootViewController;
-                while (root.presentedViewController)
-                    root = root.presentedViewController;
-                return root;
+    UIApplication *app = UIApplication.sharedApplication;
+
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in app.connectedScenes) {
+
+            if (scene.activationState != UISceneActivationStateForegroundActive)
+                continue;
+
+            if (![scene isKindOfClass:[UIWindowScene class]])
+                continue;
+
+            UIWindowScene *ws = (UIWindowScene *)scene;
+
+            for (UIWindow *w in ws.windows) {
+                if (w.isKeyWindow) {
+                    UIViewController *root = w.rootViewController;
+                    while (root.presentedViewController)
+                        root = root.presentedViewController;
+                    return root;
+                }
             }
         }
     }
+
     return nil;
 }
 
-#pragma mark - Image Picker Delegate Wrapper
+#pragma mark - Inspector
 
-@interface VC_PickerDelegate : NSObject <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
-@property (nonatomic, copy) RCTPromiseResolveBlock resolve;
-@property (nonatomic, copy) RCTPromiseRejectBlock reject;
-@end
+static void ShowInspector(void) {
 
-@implementation VC_PickerDelegate
-
-- (void)imagePickerController:(UIImagePickerController *)picker
-didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey,id> *)info {
-
-    UIImage *image = info[UIImagePickerControllerOriginalImage];
-
-    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"vc_hook.jpg"];
-    NSData *data = UIImageJPEGRepresentation(image, 0.9);
-    [data writeToFile:path atomically:YES];
-
-    [picker dismissViewControllerAnimated:YES completion:nil];
-
-    if (self.resolve) {
-        self.resolve(@{ @"path": path });
-    }
-}
-
-- (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
-
-    [picker dismissViewControllerAnimated:YES completion:nil];
-
-    if (self.reject) {
-        self.reject(@"cancelled", @"User cancelled", nil);
-    }
-}
-
-@end
-
-static VC_PickerDelegate *gPickerDelegate;
-
-#pragma mark - Hook
-
-static void hook_takePhoto(id self,
-                           SEL _cmd,
-                           id arg1,
-                           id arg2,
-                           RCTPromiseResolveBlock resolve,
-                           RCTPromiseRejectBlock reject)
-{
-    NSLog(@"📸 takePhoto intercepted -> Opening Photo Library");
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-
-        UIViewController *vc = TopVC();
-        if (!vc) {
-            reject(@"no_vc", @"No ViewController", nil);
-            return;
-        }
-
-        UIImagePickerController *picker = [UIImagePickerController new];
-        picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
-
-        gPickerDelegate = [VC_PickerDelegate new];
-        gPickerDelegate.resolve = resolve;
-        gPickerDelegate.reject = reject;
-
-        picker.delegate = gPickerDelegate;
-
-        [vc presentViewController:picker animated:YES completion:nil];
-    });
-}
-
-#pragma mark - Install
-
-static void InstallHook(void) {
+    if (gShown) return;
+    gShown = YES;
 
     Class cls = objc_getClass("CameraViewManager");
     if (!cls) {
@@ -107,23 +47,63 @@ static void InstallHook(void) {
         return;
     }
 
-    SEL sel = sel_getUid("takePhoto:options:resolve:reject:");
-    Method m = class_getInstanceMethod(cls, sel);
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
 
-    if (!m) {
-        NSLog(@"❌ takePhoto method not found");
-        return;
+    NSMutableString *output =
+    [NSMutableString stringWithString:@"CameraViewManager\n\n"];
+
+    for (unsigned int i = 0; i < count; i++) {
+
+        SEL sel = method_getName(methods[i]);
+        NSString *name = NSStringFromSelector(sel);
+
+        if ([name containsString:@"takePhoto"]) {
+
+            const char *types = method_getTypeEncoding(methods[i]);
+
+            [output appendFormat:@"SEL: %@\n", name];
+            [output appendFormat:@"TypeEncoding: %s\n\n", types];
+        }
     }
 
-    orig_takePhoto = (void *)method_getImplementation(m);
-    method_setImplementation(m, (IMP)hook_takePhoto);
+    free(methods);
 
-    NSLog(@"✅ Hook installed successfully");
+    dispatch_async(dispatch_get_main_queue(), ^{
+
+        UIViewController *vc = TopVC();
+        if (!vc) return;
+
+        UIAlertController *alert =
+        [UIAlertController alertControllerWithTitle:@"Method Inspector"
+                                            message:output
+                                     preferredStyle:UIAlertControllerStyleAlert];
+
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+                                                  style:UIAlertActionStyleCancel
+                                                handler:nil]];
+
+        [vc presentViewController:alert animated:YES completion:nil];
+    });
 }
+
+#pragma mark - Entry
 
 __attribute__((constructor))
 static void Init(void) {
+
     dispatch_async(dispatch_get_main_queue(), ^{
-        InstallHook();
+
+        if (UIApplication.sharedApplication.applicationState == UIApplicationStateActive) {
+            ShowInspector();
+        }
+
+        [[NSNotificationCenter defaultCenter]
+         addObserverForName:UIApplicationDidBecomeActiveNotification
+         object:nil
+         queue:[NSOperationQueue mainQueue]
+         usingBlock:^(NSNotification * _Nonnull note) {
+            ShowInspector();
+        }];
     });
 }
