@@ -1,40 +1,17 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-#pragma mark - Utility: Top View Controller
+static BOOL gDylibLoaded = NO;
 
-static UIViewController *VC_TopMostViewController(void) {
-    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-        UIWindowScene *windowScene = (UIWindowScene *)scene;
-        if (windowScene.activationState != UISceneActivationStateForegroundActive) continue;
+#pragma mark - Show Alert Safely
 
-        for (UIWindow *window in windowScene.windows) {
-            if (window.isKeyWindow) {
-                UIViewController *root = window.rootViewController;
-                while (root.presentedViewController) {
-                    root = root.presentedViewController;
-                }
-                return root;
-            }
-        }
-    }
-    return nil;
-}
-
-#pragma mark - Verification
-
-__attribute__((constructor))
-static void init_verify() {
+static void VC_ShowAlert(void) {
+    if (!gDylibLoaded) return;
 
     dispatch_async(dispatch_get_main_queue(), ^{
 
-        NSMutableString *status = [NSMutableString stringWithString:@"VisionCameraHook VERIFY\n\n"];
+        NSMutableString *status = [NSMutableString stringWithString:@"✅ VisionCameraHook Loaded\n\n"];
 
-        // ✅ 1. Dylib loaded
-        [status appendString:@"✅ Dylib Loaded\n"];
-
-        // ✅ 2. Check class existence
         Class cls = objc_getClass("CameraViewManager");
         if (cls) {
             [status appendString:@"✅ CameraViewManager found\n"];
@@ -42,7 +19,6 @@ static void init_verify() {
             [status appendString:@"❌ CameraViewManager NOT found\n"];
         }
 
-        // ✅ 3. Check selector existence
         SEL sel = sel_registerName("takePhoto:options:resolve:reject:");
         if (cls && class_getInstanceMethod(cls, sel)) {
             [status appendString:@"✅ takePhoto method found\n"];
@@ -50,31 +26,49 @@ static void init_verify() {
             [status appendString:@"❌ takePhoto method NOT found\n"];
         }
 
-        // ✅ 4. Show IMP address (optional debug)
-        if (cls) {
-            Method m = class_getInstanceMethod(cls, sel);
-            if (m) {
-                IMP imp = method_getImplementation(m);
-                [status appendFormat:@"\nIMP: %p\n", imp];
-            }
+        // Lấy window hiện tại
+        UIWindow *window = UIApplication.sharedApplication.windows.firstObject;
+        if (!window) return;
+
+        UIViewController *root = window.rootViewController;
+        if (!root) return;
+
+        while (root.presentedViewController) {
+            root = root.presentedViewController;
         }
 
-        // ✅ Show Alert
-        UIViewController *topVC = VC_TopMostViewController();
-        if (!topVC) return;
-
         UIAlertController *alert =
-        [UIAlertController alertControllerWithTitle:@"DYLIB STATUS"
+        [UIAlertController alertControllerWithTitle:@"DYLIB VERIFY"
                                             message:status
                                      preferredStyle:UIAlertControllerStyleAlert];
 
-        UIAlertAction *ok =
-        [UIAlertAction actionWithTitle:@"OK"
-                                 style:UIAlertActionStyleDefault
-                               handler:nil];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:nil]];
 
-        [alert addAction:ok];
+        [root presentViewController:alert animated:YES completion:nil];
 
-        [topVC presentViewController:alert animated:YES completion:nil];
+        // Chỉ hiển thị 1 lần
+        gDylibLoaded = NO;
     });
+}
+
+#pragma mark - Constructor
+
+__attribute__((constructor))
+static void init_verify(void) {
+
+    gDylibLoaded = YES;
+
+    NSLog(@"✅ VisionCameraHook dylib injected");
+
+    // Đợi app active rồi mới show alert
+    [[NSNotificationCenter defaultCenter]
+     addObserverForName:UIApplicationDidBecomeActiveNotification
+     object:nil
+     queue:[NSOperationQueue mainQueue]
+     usingBlock:^(NSNotification * _Nonnull note) {
+
+        VC_ShowAlert();
+    }];
 }
