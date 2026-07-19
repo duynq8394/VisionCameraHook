@@ -115,6 +115,9 @@ __attribute__((constructor))
 static void Init(void) {
 
     dispatch_async(dispatch_get_main_queue(), ^{
+
         InstallHook();
+
+        ShowOverlayMessage(@"✅ Observer Hook Installed-Duy");
     });
 }
