@@ -12,8 +12,8 @@ clang -dynamiclib \
   -fvisibility=default \
   -install_name @rpath/VisionCameraHook.dylib \
   -framework UIKit \
-  -framework PhotosUI \
   -framework Foundation \
+  -framework CoreGraphics \
   VisionCameraHook.m \
   -o VisionCameraHook.dylib
 
