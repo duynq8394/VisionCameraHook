@@ -1,15 +1,14 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-static BOOL gHasShownAlert = NO;
+static BOOL gInspectorShown = NO;
 
-#pragma mark - Get Top View Controller Safely
+#pragma mark - Utility: Top ViewController
 
 static UIViewController *VC_TopViewController(void) {
 
     UIApplication *app = UIApplication.sharedApplication;
 
-    // iOS 13+ (Scene-based)
     if (@available(iOS 13.0, *)) {
 
         for (UIScene *scene in app.connectedScenes) {
@@ -38,91 +37,106 @@ static UIViewController *VC_TopViewController(void) {
         }
     }
 
-    // Fallback iOS 12
-    UIWindow *keyWindow = app.keyWindow;
-    UIViewController *root = keyWindow.rootViewController;
-
-    while (root.presentedViewController) {
-        root = root.presentedViewController;
-    }
-
-    return root;
+    return nil;
 }
 
-#pragma mark - Show Verify Alert
+#pragma mark - Generic Hook Trampoline
 
-static void VC_ShowVerifyAlert(void) {
+typedef void (*GenericFunc)(id, SEL, ...);
 
-    if (gHasShownAlert) return;
-    gHasShownAlert = YES;
+static void GenericHook(id self, SEL _cmd, ...) {
+
+    NSLog(@"🔥 Inspector: Method triggered -> %@", NSStringFromSelector(_cmd));
+
+    // Gọi lại original
+    Method m = class_getInstanceMethod([self class], _cmd);
+    IMP originalImp = method_getImplementation(m);
+
+    if (originalImp) {
+        ((GenericFunc)originalImp)(self, _cmd);
+    }
+}
+
+#pragma mark - Hook Methods Dynamically
+
+static void VC_InstallInspectorHooks(void) {
+
+    Class cls = objc_getClass("CameraViewManager");
+    if (!cls) {
+        NSLog(@"❌ CameraViewManager not found");
+        return;
+    }
+
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+
+    NSLog(@"===== CameraViewManager Methods (%u) =====", count);
+
+    for (unsigned int i = 0; i < count; i++) {
+
+        SEL sel = method_getName(methods[i]);
+        NSString *name = NSStringFromSelector(sel);
+
+        NSLog(@"Method: %@", name);
+
+        if ([name containsString:@"takePhoto"]) {
+
+            NSLog(@"✅ Installing inspector hook for %@", name);
+
+            method_setImplementation(methods[i], (IMP)GenericHook);
+        }
+    }
+
+    free(methods);
+}
+
+#pragma mark - UI Verify
+
+static void VC_ShowInspectorAlert(void) {
+
+    if (gInspectorShown) return;
+    gInspectorShown = YES;
 
     dispatch_async(dispatch_get_main_queue(), ^{
 
-        NSMutableString *status =
-        [NSMutableString stringWithString:@"✅ VisionCameraHook Loaded\n\n"];
+        NSMutableString *msg =
+        [NSMutableString stringWithString:@"✅ Inspector Loaded\n\n"];
 
-        // Check class
         Class cls = objc_getClass("CameraViewManager");
-        if (cls) {
-            [status appendString:@"✅ CameraViewManager found\n"];
-        } else {
-            [status appendString:@"❌ CameraViewManager NOT found\n"];
-        }
 
-        // Check selector
-        SEL sel = sel_registerName("takePhoto:options:resolve:reject:");
-        if (cls && class_getInstanceMethod(cls, sel)) {
-            [status appendString:@"✅ takePhoto method found\n"];
-        } else {
-            [status appendString:@"❌ takePhoto method NOT found\n"];
-        }
+        if (cls)
+            [msg appendString:@"✅ CameraViewManager found\n"];
+        else
+            [msg appendString:@"❌ CameraViewManager NOT found\n"];
 
-        UIViewController *topVC = VC_TopViewController();
-        if (!topVC) {
-            NSLog(@"VisionCameraHook: Top VC not found");
-            return;
-        }
+        UIViewController *top = VC_TopViewController();
+        if (!top) return;
 
         UIAlertController *alert =
-        [UIAlertController alertControllerWithTitle:@"DYLIB VERIFY"
-                                            message:status
+        [UIAlertController alertControllerWithTitle:@"VisionCamera Inspector"
+                                            message:msg
                                      preferredStyle:UIAlertControllerStyleAlert];
 
-        UIAlertAction *okAction =
+        UIAlertAction *ok =
         [UIAlertAction actionWithTitle:@"OK"
-                                 style:UIAlertActionStyleCancel
+                                 style:UIAlertActionStyleDefault
                                handler:nil];
 
-        [alert addAction:okAction];
-
-        [topVC presentViewController:alert animated:YES completion:nil];
-
-        NSLog(@"✅ VisionCameraHook alert presented");
+        [alert addAction:ok];
+        [top presentViewController:alert animated:YES completion:nil];
     });
 }
 
-#pragma mark - Constructor (Entry Point)
+#pragma mark - Entry
 
 __attribute__((constructor))
 static void VisionCameraHook_Init(void) {
 
-    NSLog(@"✅ VisionCameraHook dylib injected");
+    NSLog(@"✅ Inspector dylib injected");
 
     dispatch_async(dispatch_get_main_queue(), ^{
 
-        // Nếu app đã active thì show luôn
-        if (UIApplication.sharedApplication.applicationState == UIApplicationStateActive) {
-            VC_ShowVerifyAlert();
-        }
-
-        // Nếu chưa active thì đợi
-        [[NSNotificationCenter defaultCenter]
-         addObserverForName:UIApplicationDidBecomeActiveNotification
-         object:nil
-         queue:[NSOperationQueue mainQueue]
-         usingBlock:^(NSNotification * _Nonnull note) {
-
-            VC_ShowVerifyAlert();
-        }];
+        VC_ShowInspectorAlert();
+        VC_InstallInspectorHooks();
     });
 }
